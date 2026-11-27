@@ -1,0 +1,124 @@
+# make.fun bounty runner — workflow untuk SATU akun GitHub
+# Ditulis Sayang dari nol, 27 Nov 2026 (Opsi A — tanpa memakai file hasil koordinator
+# yang tidak lolos pemeriksaan keamanan). Perintah CLI diverifikasi Sayang sendiri
+# dari `node cli/makefun.mjs --help` kit resmi level 60 di VM ini.
+#
+# Repo: <owner>/makefun-runner (publik). Trigger HANYA workflow_dispatch (manual).
+# Secret wajib di repo: MAKEFUN_API_KEY (af_ key akun ini, dari ~/.makefun/credentials).
+#
+# Job submit TIDAK ADA di sini dengan sengaja: `makefun submit` menandatangani entry
+# dengan wallet akun (lihat --help: submit termasuk perintah yang sign dengan wallet
+# lewat signer yang tersimpan bersama key). Runner baru tidak punya signer/keypair
+# akun itu, jadi submit dari runner akan gagal. Sampai Player menyetujui pengaturan
+# tanda tangan untuk runner, submit TETAP dari VM ini; runner dipakai untuk
+# check + bundle saja.
+
+name: makefun-bounty
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "test = hanya smoke-test. check = lanjut kit + check + bundle."
+        required: true
+        default: "test"
+        type: choice
+        options: [test, check]
+      bounty_slug:
+        description: "Slug bounty make.fun"
+        required: true
+        type: string
+      entry_repo:
+        description: "Repo entry akun ini (owner/repo). Dipakai hanya bila mode check."
+        required: true
+        type: string
+      session_path:
+        description: "Path file session builder di dalam repo entry (kosong = bundle dilewati)"
+        required: false
+        default: ""
+        type: string
+      confirm_submit:
+        description: "Selalu isi TIDAK. Submit dari runner belum diaktifkan."
+        required: true
+        default: "TIDAK"
+        type: string
+
+jobs:
+  smoke-test:
+    name: smoke-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Info runner
+        run: |
+          echo "runner: $(uname -a)"
+          node --version
+          echo "akun: 8"
+          echo "smoke test OK"
+
+  prepare-and-check:
+    name: kit-check-bundle
+    runs-on: ubuntu-latest
+    needs: smoke-test
+    if: ${{ inputs.mode == 'check' }}
+    env:
+      MAKEFUN_API_KEY: ${{ secrets.MAKEFUN_API_KEY }}
+      NODE_USE_ENV_PROXY: "1"
+    steps:
+      - name: Checkout repo entry
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.entry_repo }}
+          path: entry
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Unduh kit resmi (tarball ke file, lalu unpack)
+        run: |
+          set -euo pipefail
+          curl -sSL -o kit.tar.gz "https://make.fun/c/${{ inputs.bounty_slug }}/kit"
+          test -s kit.tar.gz
+          mkdir -p kit
+          tar xzf kit.tar.gz -C kit --strip-components=1
+          ls kit/cli/makefun.mjs
+
+      - name: Verifikasi isi kit lawan kit.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          kit = json.load(open('kit/kit.json'))
+          bad = []
+          for f in kit['files']:
+              p = Path('kit') / f['path']
+              h = hashlib.sha256(p.read_bytes()).hexdigest()
+              if h != f['sha256']:
+                  bad.append(f['path'])
+          if bad:
+              print('KIT TIDAK COCOK:', bad)
+              sys.exit(1)
+          print(f"kit terverifikasi: {len(kit['files'])} file cocok")
+          PY
+
+      - name: Check entry
+        run: |
+          set -euo pipefail
+          node kit/cli/makefun.mjs check --kit kit --repo entry
+
+      - name: Bundle transcripts (bila session diberikan)
+        if: ${{ inputs.session_path != '' }}
+        run: |
+          set -euo pipefail
+          node kit/cli/makefun.mjs bundle --repo entry --out transcripts.tar.gz --session "entry/${{ inputs.session_path }}"
+          ls -la transcripts.tar.gz
+
+      - name: Upload bundle sebagai artifact
+        if: ${{ inputs.session_path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcripts-akun-8
+          path: transcripts.tar.gz
+          retention-days: 7
